@@ -1,14 +1,14 @@
 
 import io
-import re
+import hmac
 import streamlit as st
 from docx import Document
 from docx.shared import Cm, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# ==========================================
-# PENGATURAN APLIKASI
-# ==========================================
+# =====================================
+# KONFIGURASI APLIKASI
+# =====================================
 
 st.set_page_config(
     page_title="Puisi Formatter Online",
@@ -16,44 +16,88 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📖 Puisi Formatter Online")
-st.caption("Aplikasi penataan naskah antologi puisi")
-
-# ==========================================
-# LOGIN GOOGLE DAN PEMBATASAN AKSES
-# ==========================================
+# =====================================
+# LOGIN KODE AKSES
+# =====================================
 
 def check_login():
-    if not st.user.is_logged_in:
-        st.title("Selamat Datang!")
-        st.write("Silakan masuk menggunakan akun Google.")
-        st.button("Masuk dengan Google", on_click=st.login)
-        st.stop()
+    if st.session_state.get("authenticated", False):
+        return
 
-    allowed = [
-        email.strip().lower()
-        for email in st.secrets.get("allowed_emails", [])
-    ]
+    st.title("📖 Puisi Formatter Online")
+    st.write("Masukkan kode akses untuk menggunakan aplikasi.")
 
-    current_email = str(st.user.get("email", "")).lower()
+    with st.form("login"):
+        password = st.text_input(
+            "Kode akses",
+            type="password"
+        )
+        submitted = st.form_submit_button("Masuk")
 
-    if not current_email or current_email not in allowed:
-        st.error("Maaf, akun Google ini belum memiliki izin akses.")
-        st.button("Keluar", on_click=st.logout)
-        st.stop()
+    if submitted:
+        expected = st.secrets.get("access_password", "")
+
+        if expected and hmac.compare_digest(password, str(expected)):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Kode akses salah atau belum dikonfigurasi.")
+
+    st.stop()
 
 
 check_login()
 
-# ==========================================
-# PENANDA NASKAH
-# ==========================================
+# =====================================
+# TAMPILAN UTAMA
+# =====================================
 
-AUTHOR_PREFIXES = (
-    "karya:",
-    "oleh:",
-    "penulis:",
-    "ditulis oleh:"
+st.title("📖 Puisi Formatter Online")
+st.caption("Rapikan naskah antologi puisi secara otomatis.")
+
+with st.sidebar:
+    st.header("⚙️ Pengaturan Format")
+
+    paper = st.selectbox("Ukuran kertas", ["A5", "A4"])
+
+    if paper == "A5":
+        page_width, page_height = 14.8, 21.0
+    else:
+        page_width, page_height = 21.0, 29.7
+
+    margin = st.number_input(
+        "Margin (cm)", 1.0, 4.0, 2.0, 0.25
+    )
+
+    font_name = st.selectbox(
+        "Jenis huruf",
+        ["Times New Roman", "Arial", "Calibri", "Garamond"]
+    )
+
+    font_size = st.number_input(
+        "Ukuran huruf",
+        9, 16, 12
+    )
+
+    spacing = st.selectbox(
+        "Spasi baris",
+        [1.0, 1.15, 1.5, 2.0],
+        index=1
+    )
+
+    st.divider()
+
+    if st.button("Keluar"):
+        st.session_state.authenticated = False
+        st.rerun()
+
+
+# =====================================
+# DETEKSI NASKAH
+# =====================================
+
+AUTHOR_MARKERS = (
+    "karya:", "oleh:", "penulis:", "ditulis oleh:"
 )
 
 BIO_MARKERS = (
@@ -65,7 +109,6 @@ BIO_MARKERS = (
 
 
 def is_title(text):
-    """Deteksi awal judul berdasarkan pola teks."""
     text = text.strip()
 
     if len(text) < 3 or len(text) > 120:
@@ -76,22 +119,15 @@ def is_title(text):
     if not letters:
         return False
 
-    uppercase_ratio = (
-        sum(c.isupper() for c in letters) / len(letters)
-    )
+    ratio = sum(c.isupper() for c in letters) / len(letters)
 
-    return uppercase_ratio >= 0.75
+    return ratio >= 0.75
 
 
 def detect_document(file_bytes):
-    """Membaca dan mengelompokkan karya dalam dokumen Word."""
+    doc = Document(io.BytesIO(file_bytes))
 
-    source = Document(io.BytesIO(file_bytes))
-
-    paragraphs = [
-        p.text.strip()
-        for p in source.paragraphs
-    ]
+    paragraphs = [p.text.strip() for p in doc.paragraphs]
 
     works = []
     current = None
@@ -100,17 +136,8 @@ def detect_document(file_bytes):
     in_bio = False
 
     for text in paragraphs:
-
-        if not text:
-            if current and not in_bio:
-                current["body"].append("")
-            elif in_bio:
-                bio.append("")
-            continue
-
         lower = text.lower()
 
-        # Deteksi bagian biodata
         if any(marker in lower for marker in BIO_MARKERS):
             if current:
                 works.append(current)
@@ -124,28 +151,27 @@ def detect_document(file_bytes):
             bio.append(text)
             continue
 
-        # Deteksi nama penulis
-        author_match = next(
-            (
-                prefix for prefix in AUTHOR_PREFIXES
-                if lower.startswith(prefix)
-            ),
+        if not text:
+            if current:
+                current["body"].append("")
+            continue
+
+        marker = next(
+            (m for m in AUTHOR_MARKERS if lower.startswith(m)),
             None
         )
 
-        if author_match:
-            author_name = text[len(author_match):].strip()
+        if marker:
+            author_text = text[len(marker):].strip()
 
-            if current:
+            if current is not None and not current["author"]:
                 current["author"] = text
             else:
                 pending_author = text
 
             continue
 
-        # Deteksi judul baru
         if is_title(text):
-
             if current:
                 works.append(current)
 
@@ -158,7 +184,6 @@ def detect_document(file_bytes):
             pending_author = ""
             continue
 
-        # Masukkan teks sebagai isi puisi
         if current is None:
             current = {
                 "title": "JUDUL BELUM TERDETEKSI",
@@ -175,49 +200,33 @@ def detect_document(file_bytes):
     return works, bio
 
 
-# ==========================================
-# FUNGSI PEMFORMATAN WORD
-# ==========================================
+# =====================================
+# MEMBUAT DOKUMEN WORD
+# =====================================
 
-def set_font(run, font_name, size, bold=False):
-    run.font.name = font_name
+def set_font(run, name, size, bold=False):
+    run.font.name = name
     run.font.size = Pt(size)
     run.font.bold = bold
-    run.font.italic = False
     run.font.color.rgb = RGBColor(0, 0, 0)
-
-
-def format_paragraph(
-    paragraph,
-    alignment,
-    before=0,
-    after=0,
-    spacing=1.15
-):
-    paragraph.alignment = alignment
-    paragraph.paragraph_format.space_before = Pt(before)
-    paragraph.paragraph_format.space_after = Pt(after)
-    paragraph.paragraph_format.line_spacing = spacing
 
 
 def make_output(
     works,
     bio,
     include_bio,
-    paper_width,
-    paper_height,
+    page_width,
+    page_height,
     margin,
     font_name,
     font_size,
-    line_spacing
+    spacing
 ):
-
     doc = Document()
 
     section = doc.sections[0]
-
-    section.page_width = Cm(paper_width)
-    section.page_height = Cm(paper_height)
+    section.page_width = Cm(page_width)
+    section.page_height = Cm(page_height)
 
     section.top_margin = Cm(margin)
     section.bottom_margin = Cm(margin)
@@ -229,150 +238,60 @@ def make_output(
         if index > 0:
             doc.add_page_break()
 
-        # JUDUL PUISI
-        title = doc.add_paragraph()
+        # Judul
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_after = Pt(0)
 
-        format_paragraph(
-            title,
-            WD_ALIGN_PARAGRAPH.CENTER,
-            after=0,
-            spacing=1.0
-        )
+        r = p.add_run(work["title"].upper())
+        set_font(r, "DengXian", 14, True)
 
-        run = title.add_run(work["title"].upper())
+        # Penulis
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_after = Pt(12)
 
-        set_font(run, "DengXian", 14, True)
+        author = work["author"] or "Karya: [Nama Penulis]"
+        r = p.add_run(author)
+        set_font(r, font_name, font_size)
 
-        # NAMA PENULIS
-        author = doc.add_paragraph()
-
-        format_paragraph(
-            author,
-            WD_ALIGN_PARAGRAPH.CENTER,
-            after=12,
-            spacing=1.0
-        )
-
-        author_text = (
-            work["author"]
-            or "Karya: [Nama Penulis]"
-        )
-
-        run = author.add_run(author_text)
-
-        set_font(run, font_name, font_size)
-
-        # ISI PUISI
+        # Isi puisi
         for line in work["body"]:
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            p.paragraph_format.space_after = Pt(0)
+            p.paragraph_format.line_spacing = spacing
 
-            paragraph = doc.add_paragraph()
+            r = p.add_run(line)
+            set_font(r, font_name, font_size)
 
-            format_paragraph(
-                paragraph,
-                WD_ALIGN_PARAGRAPH.LEFT,
-                before=0,
-                after=0,
-                spacing=line_spacing
-            )
-
-            run = paragraph.add_run(line)
-
-            set_font(run, font_name, font_size)
-
-    # BAGIAN BIODATA
+    # Biodata
     if include_bio and bio:
-
         doc.add_page_break()
 
-        heading = doc.add_paragraph()
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        format_paragraph(
-            heading,
-            WD_ALIGN_PARAGRAPH.CENTER
-        )
-
-        run = heading.add_run("BIODATA PENULIS")
-
-        set_font(run, "DengXian", 14, True)
+        r = p.add_run("BIODATA PENULIS")
+        set_font(r, "DengXian", 14, True)
 
         for line in bio:
+            p = doc.add_paragraph()
+            p.paragraph_format.line_spacing = spacing
 
-            paragraph = doc.add_paragraph()
-
-            format_paragraph(
-                paragraph,
-                WD_ALIGN_PARAGRAPH.LEFT,
-                spacing=line_spacing
-            )
-
-            run = paragraph.add_run(line)
-
-            set_font(run, font_name, font_size)
+            r = p.add_run(line)
+            set_font(r, font_name, font_size)
 
     output = io.BytesIO()
-
     doc.save(output)
     output.seek(0)
 
     return output
 
 
-# ==========================================
-# TAMPILAN UTAMA
-# ==========================================
-
-user_email = str(st.user.get("email", ""))
-
-st.write(
-    f"Selamat datang, {st.user.get('name', user_email)}!"
-)
-
-st.caption(f"Akun: {user_email}")
-
-with st.sidebar:
-    st.header("⚙️ Pengaturan")
-    
-    paper = st.selectbox(
-        "Ukuran kertas",
-        ["A5", "A4"]
-    )
-
-    if paper == "A5":
-        paper_width, paper_height = 14.8, 21.0
-    else:
-        paper_width, paper_height = 21.0, 29.7
-
-    margin = st.number_input(
-        "Margin (cm)",
-        min_value=1.0,
-        max_value=4.0,
-        value=2.0,
-        step=0.25
-    )
-
-    font_name = st.selectbox(
-        "Jenis huruf isi puisi",
-        ["Times New Roman", "Arial", "Calibri", "Garamond"]
-    )
-
-    font_size = st.number_input(
-        "Ukuran huruf",
-        min_value=9,
-        max_value=16,
-        value=12
-    )
-
-    line_spacing = st.selectbox(
-        "Jarak antarbaris",
-        [1.0, 1.15, 1.5, 2.0],
-        index=1
-    )
-
-    st.divider()
-
-    if st.button("Keluar dari aplikasi"):
-        st.logout()
-
+# =====================================
+# UNGGAH DAN PROSES NASKAH
+# =====================================
 
 st.subheader("1. Unggah Naskah Word")
 
@@ -383,135 +302,101 @@ uploaded = st.file_uploader(
 
 if uploaded:
 
-    file_bytes = uploaded.getvalue()
-
-    if len(file_bytes) > 15 * 1024 * 1024:
+    if uploaded.size > 15 * 1024 * 1024:
         st.error("Ukuran file maksimal 15 MB.")
+        st.stop()
 
-    else:
+    try:
+        works, bio = detect_document(uploaded.getvalue())
 
-        try:
+        st.success(f"{len(works)} karya terdeteksi.")
 
-            works, bio = detect_document(file_bytes)
+        if not works:
+            st.warning("Belum ada karya yang terdeteksi.")
+            st.stop()
 
-            st.success(
-                f"Deteksi selesai: {len(works)} karya ditemukan."
-            )
+        st.subheader("2. Periksa Hasil Deteksi")
 
-            st.info(
-                "Silakan periksa dan koreksi hasil deteksi "
-                "sebelum membuat dokumen."
-            )
+        edited = []
 
-            edited = []
-
-            st.subheader("2. Periksa Hasil Deteksi")
-
-            for i, work in enumerate(works):
-
-                with st.expander(
-                    f"Karya {i + 1}: {work['title']}",
-                    expanded=(i == 0)
-                ):
-
-                    title = st.text_input(
-                        "Judul puisi",
-                        value=work["title"],
-                        key=f"title_{i}"
-                    )
-
-                    author = st.text_input(
-                        "Nama penulis",
-                        value=work["author"],
-                        key=f"author_{i}"
-                    )
-
-                    body = st.text_area(
-                        "Isi puisi",
-                        value="\n".join(work["body"]),
-                        height=220,
-                        key=f"body_{i}"
-                    )
-
-                    edited.append({
-                        "title": title,
-                        "author": author,
-                        "body": body.splitlines()
-                    })
-
-            if bio:
-
-                st.subheader("3. Biodata Penulis")
-
-                edited_bio = st.text_area(
-                    "Periksa biodata",
-                    value="\n".join(bio),
-                    height=180
-                )
-
-                bio = edited_bio.splitlines()
-
-            else:
-
-                st.warning(
-                    "Bagian biodata belum terdeteksi."
-                )
-
-            include_bio = st.checkbox(
-                "Sertakan biodata penulis",
-                value=bool(bio)
-            )
-
-            st.divider()
-
-            st.subheader("4. Buat Dokumen Word")
-
-            if st.button(
-                "✨ Proses dan Buat Dokumen Word",
-                type="primary",
-                disabled=not edited
+        for i, work in enumerate(works):
+            with st.expander(
+                f"Karya {i + 1}: {work['title']}",
+                expanded=(i == 0)
             ):
-
-                result = make_output(
-                    edited,
-                    bio,
-                    include_bio,
-                    paper_width,
-                    paper_height,
-                    margin,
-                    font_name,
-                    font_size,
-                    line_spacing
+                title = st.text_input(
+                    "Judul puisi",
+                    value=work["title"],
+                    key=f"title_{i}"
                 )
 
-                st.success("Dokumen Word berhasil dibuat!")
-
-                st.download_button(
-                    "⬇️ Unduh Hasil DOCX",
-                    data=result,
-                    file_name="Naskah_Antologi_Tertata.docx",
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "wordprocessingml.document"
-                    )
+                author = st.text_input(
+                    "Nama penulis",
+                    value=work["author"],
+                    key=f"author_{i}"
                 )
 
-        except Exception as error:
+                body = st.text_area(
+                    "Isi puisi",
+                    value="\n".join(work["body"]),
+                    height=200,
+                    key=f"body_{i}"
+                )
 
-            st.error(
-                f"Dokumen tidak dapat diproses: {error}"
+                edited.append({
+                    "title": title,
+                    "author": author,
+                    "body": body.splitlines()
+                })
+
+        if bio:
+            st.subheader("3. Biodata Penulis")
+
+            bio_text = st.text_area(
+                "Periksa biodata",
+                value="\n".join(bio),
+                height=180
             )
+
+            bio = bio_text.splitlines()
+
+        include_bio = st.checkbox(
+            "Sertakan biodata penulis",
+            value=bool(bio)
+        )
+
+        st.divider()
+
+        if st.button(
+            "✨ Proses dan Buat Dokumen Word",
+            type="primary"
+        ):
+            result = make_output(
+                edited,
+                bio,
+                include_bio,
+                page_width,
+                page_height,
+                margin,
+                font_name,
+                font_size,
+                spacing
+            )
+
+            st.success("Dokumen berhasil dibuat!")
+
+            st.download_button(
+                "⬇️ Unduh Hasil DOCX",
+                data=result,
+                file_name="Naskah_Antologi_Tertata.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+    except Exception as error:
+        st.error(f"Terjadi kesalahan: {error}")
 
 else:
-
-    st.info(
-        "Silakan unggah naskah Word untuk memulai."
-    )
-
+    st.info("Unggah dokumen Word untuk mulai merapikan naskah.")
 
 st.divider()
-
-st.caption(
-    "Puisi Formatter Online | Pemrosesan sementara. "
-    "Tidak ada penyimpanan naskah permanen yang disengaja."
-)
+st.caption("Puisi Formatter Online | Pemrosesan sementara.")
